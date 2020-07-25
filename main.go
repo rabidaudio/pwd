@@ -3,127 +3,140 @@ package main
 import (
 	"bytes"
 	"errors"
-	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
-	"os/exec"
-	"strings"
 	"sync"
-	"time"
 
-	mapset "github.com/deckarep/golang-set"
+	zipw "github.com/alexmullins/zip"
 )
+
+type charset []byte
 
 var (
 	Lower    = charRange('a', 'z')
 	Upper    = charRange('A', 'Z')
 	Numbers  = charRange('0', '9')
-	Symbols  = []byte{'.', '/', '-', '_', '!', '?', '@', '#', '$', '%', '^', '&', '*', '+', '='}
+	Symbols  = charset{'.', '/', '-', '_', '!', '?', '@', '#', '$', '%', '^', '&', '*', '+', '='}
 	AllASCII = charRange(rune(32), rune(126))
 
-	Combinations = [][][]byte{
-		{Lower},
-		{Lower, Numbers},
-		{Lower, Upper, Numbers},
-		{Lower, Upper, Numbers, Symbols},
-		{AllASCII},
+	Combinations = []charset{
+		Lower,
+		Upper,
+		flattenCharsets(Upper, Numbers),
+		flattenCharsets(Lower, Numbers),
+		flattenCharsets(Lower, Numbers, Symbols),
+		flattenCharsets(Lower, Upper, Numbers, Symbols),
+		AllASCII,
 	}
 	Sizes = []int{6, 1, 2, 3, 4, 5, 7, 8}
-
-	MaxWorkers = 500
 )
 
-func charRange(start, end rune) []byte {
-	bytes := make([]byte, int(end-start)+1)
+const (
+	MaxWorkers = 50
+	LogEvery   = 100000
+)
+
+func flattenCharsets(sets ...charset) charset {
+	cs := make(charset, 0)
+	for _, s := range sets {
+		for _, c := range s {
+			if !bytes.ContainsRune(cs, rune(c)) {
+				cs = append(cs, c)
+			}
+		}
+	}
+	return cs
+}
+
+func charRange(start, end rune) charset {
+	bytes := make(charset, int(end-start)+1)
 	for i := 0; i <= int(end-start); i++ {
 		bytes[i] = byte(int(start) + i)
 	}
 	return bytes
 }
 
-var ErrWrongPassword = errors.New("Wrong Password")
-var ErrTooManyOpenFiles = errors.New("Too Many Open Files")
-
 // guessPassword tries to unzip the file with the given password. Will return nil
 // if the password was successful, WrongPasswordErr if there was a wrong password,
 // and pass along any other errors
-func guessPassword(file, password string) error {
-	parg := fmt.Sprintf("-p%v", password)
-	cmd := exec.Command("7z", "x", "-y", "-so", parg, file)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		msg := stderr.String()
-		if strings.Contains(msg, "Wrong password") {
-			return ErrWrongPassword
-		} else if strings.Contains(msg, "too many open files") {
-			return ErrTooManyOpenFiles
-		}
-		log.Printf("Error with command `7z x -y -so -p%v %v`: %v", password, file, err)
-		return err
+func guessPassword(file string, guesses <-chan string, match chan<- string) string {
+	f, err := os.Open(file)
+	if err != nil {
+		log.Panicf("Couldn't open file: %v", err)
 	}
-	return nil
-}
-
-func charsets() [][]byte {
-	charsets := make([][]byte, 0)
-	for _, combination := range Combinations {
-		charset := make([]byte, 0)
-		for _, c := range combination {
-			charset = append(charset, c...)
-		}
-		charsets = append(charsets, charset)
+	defer f.Close()
+	data, err := ioutil.ReadAll(f)
+	if err != nil {
+		log.Panicf("Couldn't read file: %v", err)
 	}
-	return charsets
+	buf := bytes.NewReader(data)
+	r, err := zipw.NewReader(buf, int64(len(data)))
+	if err != nil {
+		log.Panicf("Couldn't create zip reader: %v", err)
+	}
+	var zf *zipw.File
+	for i := 0; i < len(r.File); i++ {
+		zf = r.File[i]
+		if zf.IsEncrypted() && !zf.FileInfo().IsDir() {
+			break
+		}
+	}
+	for guess := range guesses {
+		zf.SetPassword(guess)
+		_, err := zf.Open()
+		if errors.Is(err, zipw.ErrPassword) {
+			continue
+		}
+		if err != nil {
+			log.Panicf("problem guessing password: %v", err)
+		}
+		// there's a 1 in 2^16 chance that the password verification
+		// byte matches for any password. we need to actually
+		// read the value
+		rc, err := zf.Open()
+		if err != nil {
+			log.Panicf("open err: %v", err)
+		}
+		b := make([]byte, 1)
+		_, err = rc.Read(b)
+		if errors.Is(err, zipw.ErrAuthentication) {
+			continue
+		}
+		if match != nil {
+			match <- guess
+		}
+		return guess
+	}
+	return ""
 }
 
 func main() {
-	file := os.Args[1]
-	if file == "" {
+	if len(os.Args) < 2 {
 		log.Fatalf("USAGE: pwd [path-to-zip-file]")
 	}
+	file := os.Args[1]
+	var skipahead string
+	if len(os.Args) > 2 {
+		skipahead = os.Args[2]
+	}
 
-	guessed := mapset.NewSet()
-	// running these things in parallel can quickly eat up all the file handles for the process
-	// so we limit the number of parallel goroutines
+	match := make(chan string)
+	go func() {
+		password := <-match
+		log.Printf("Got 'em! The password is: %v", password)
+		os.Exit(0)
+	}()
+
 	wg := sync.WaitGroup{}
 
-	for _, size := range Sizes {
-		for _, charset := range charsets() {
-			guesses := make(chan string)
-			log.Printf("Trying %d character set of length %d", len(charset), size)
-			go eachPermutation(charset, size, guesses)
-			for i := 0; i < MaxWorkers; i++ {
-				wg.Add(1)
-				go func(file string) {
-					defer wg.Done()
-					for guess := range guesses {
-					Retry:
-						if guessed.Contains(guess) {
-							continue
-						}
-						err := guessPassword(file, guess)
-						if err == nil {
-							log.Printf("Got 'em! The password is: %v", guess)
-							os.Exit(0)
-							return
-						}
-						if errors.Is(err, ErrWrongPassword) {
-							// expected
-							continue
-						}
-						if errors.Is(err, ErrTooManyOpenFiles) {
-							log.Print("Too many open files, backing off...")
-							time.Sleep(100)
-							goto Retry
-						}
-						log.Panic(err)
-					}
-				}(file)
-			}
-			wg.Wait()
-		}
+	guesses := make(chan string)
+	go generatePermutations([]byte(skipahead), guesses)
+	for i := 0; i < MaxWorkers; i++ {
+		wg.Add(1)
+		go guessPassword(file, guesses, match)
 	}
+	wg.Wait()
 	log.Fatal(`No luck ¯\_(ツ)_/¯`)
 }
 
@@ -151,20 +164,67 @@ func (c *charsetIterator) Next(out []byte) (done bool) {
 	return false
 }
 
-func eachPermutation(charset []byte, size int, guesses chan<- string) {
-	iterators := make([]charsetIterator, size)
-	for i := 0; i < size-1; i++ {
-		iterators[i] = charsetIterator{charset: charset, next: &iterators[i+1]}
+func (cs charset) Contains(b byte) bool {
+	for _, c := range cs {
+		if c == b {
+			return true
+		}
 	}
-	iterators[size-1] = charsetIterator{charset: charset}
-	done := false
-	guess := make([]byte, size)
-	for i := 0; !done; i++ {
-		done = iterators[0].Next(guess)
-		s := string(guess)
-		guesses <- s
-		if i%1000000 == 0 {
-			log.Printf("guess %010dM: %v", i/1000000, s)
+	return false
+}
+
+func (cs charset) ContainsAll(b []byte) bool {
+	for _, c := range b {
+		if !cs.Contains(c) {
+			return false
+		}
+	}
+	return true
+}
+
+func alreadyCompleted(completedCharsets []charset, guess []byte) bool {
+	for _, charset := range completedCharsets {
+		if charset.ContainsAll(guess) {
+			return true
+		}
+	}
+	return false
+}
+
+func generatePermutations(skipahead []byte, guesses chan<- string) {
+	skipping := len(skipahead) > 0
+	index := uint64(0)
+	for _, size := range Sizes {
+		completedCharsets := make([]charset, 0, len(Combinations))
+		for _, charset := range Combinations {
+			log.Printf("Trying %d character set of length %d", len(charset), size)
+			iterators := make([]charsetIterator, size)
+			for i := 0; i < size-1; i++ {
+				iterators[i] = charsetIterator{charset: charset, next: &iterators[i+1]}
+			}
+			iterators[size-1] = charsetIterator{charset: charset}
+			done := false
+			guess := make([]byte, size)
+			for !done {
+				done = iterators[0].Next(guess)
+				index++
+				if alreadyCompleted(completedCharsets, guess) {
+					continue
+				}
+				if skipping {
+					if bytes.Equal(skipahead, guess) {
+						log.Printf("skipped ahead to %v", string(skipahead))
+						skipping = false
+					}
+					continue
+				}
+				s := string(guess)
+				if index%LogEvery == 0 {
+					log.Printf("guess %015d: %v", index, s)
+				}
+				guesses <- s
+			}
+			completedCharsets = append(completedCharsets, charset)
 		}
 	}
 	close(guesses)
