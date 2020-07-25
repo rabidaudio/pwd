@@ -1,0 +1,16 @@
+unzip -v -P foobar test.zip -d test2
+
+zip -e test.zip test
+
+
+7z a -p test.zip test
+
+7z x -y -otest2 -pfoo test.zip
+
+x = system("7z x -y -otest2 -pfoobarz test.zip")
+
+
+mount -t tmpfs -o size=128M tmpfs out
+
+
+7z x -y -pfoo test.zip
