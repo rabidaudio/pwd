@@ -21,6 +21,7 @@ var (
 	AllASCII = charRange(rune(32), rune(126))
 
 	Combinations = []charset{
+		Numbers,
 		Lower,
 		Upper,
 		flattenCharsets(Upper, Numbers),
@@ -29,7 +30,7 @@ var (
 		flattenCharsets(Lower, Upper, Numbers, Symbols),
 		AllASCII,
 	}
-	Sizes = []int{6, 1, 2, 3, 4, 5, 7, 8}
+	Sizes = []int{6}
 )
 
 const (

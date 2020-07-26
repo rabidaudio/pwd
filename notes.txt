@@ -1,26 +1,20 @@
+
+```bash
 unzip -v -P foobar test.zip -d test2
-
 zip -e test.zip test
-
-
 7z a -p test.zip test
-
 7z x -y -otest2 -pfoo test.zip
-
-x = system("7z x -y -otest2 -pfoobarz test.zip")
-
-
 mount -t tmpfs -o size=128M tmpfs out
-
-
 7z x -y -pfoo test.zip
+```
 
-guessed up to cpesff
+guessed up to `AXC77L`
 
-https://www.winzip.com/win/en/aes_info.html
-https://github.com/alexmullins/zip
-https://en.wikipedia.org/wiki/Zip_(file_format)#Encryption
+- https://www.winzip.com/win/en/aes_info.html
+- https://github.com/alexmullins/zip
+- https://en.wikipedia.org/wiki/Zip_(file_format)#Encryption
 
+```
 2216066 ns/op -> 1/(2216066/1000/1000/1000) -> 450 it/sec
 (26^6)/2/450/60/60 = 95 compute hours
 20/30/24 = $0.28/hours
@@ -30,19 +24,13 @@ c5.9xlarge -> $1.53/hr
 100K in 13 seconds
 (26^6)/2/(100000/13)/60/60*(1.53) => $8.53
 
-
 100000/13/(1.53/60/60) -> 18K/$
+```
 
+```bash
 scp -i ~/.ssh/rabidaudio.pem -r * ubuntu@3.83.155.244:~/
-
-
 ssh -i ~/.ssh/rabidaudio.pem ubuntu@3.83.155.244
-
 sudo add-apt-repository ppa:longsleep/golang-backports
 sudo apt update && sudo apt install -yy golang-go
-
-apt-get install screen
-
 go build main.go
-./main in/carlyra-emotio-2015/CarlyRaeJepsen-EMOTIONDeluxe\ \[2015\].zip cnqwsd
-
+```
